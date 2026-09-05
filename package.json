@@ -1,0 +1,35 @@
+{
+  "name": "xgol-be",
+  "version": "1.0.0",
+  "description": "XGOL backend - AI speaking coach API with local recordings, Gemma 4 on Bedrock Mantle, and SSE feedback.",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "nodemon server.js",
+    "seed:local": "node scripts/seed-local.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://xgolpro@dev.azure.com/xgolpro/XGOL/_git/xgol-be"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "joi": "^17.12.0",
+    "joi-password-complexity": "^5.2.0",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^7.2.0",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "nodemon": "^2.0.22",
+    "resend": "^4.5.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0",
+    "uuid": "^14.0.2"
+  }
+}
