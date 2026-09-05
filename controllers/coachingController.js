@@ -1,5 +1,3 @@
-const fs = require("fs/promises");
-const path = require("path");
 const mongoose = require("mongoose");
 const Joi = require("joi");
 const Profile = require("../models/coachingProfile");
@@ -11,7 +9,7 @@ const Journal = require("../models/userJournal");
 const { streamMantleText } = require("../aws/mantle");
 const { profileSchema, sessionSchema, section, buildPrompt, wavDuration } = require("../utils/coaching");
 const { hasRequiredDelegatedPermissions: hasPermission } = require("../middleware/permissionUtils");
-const { audioDir } = require("../middleware/uploadAudio");
+const { deleteAudio, saveAudio, streamAudio } = require("../utils/audioStorage");
 const activeLicense = user => ({ user, activated: true, $expr: { $gt: [{ $convert: { input: "$expiryDate", to: "date", onError: null, onNull: null } }, new Date()] } });
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -35,7 +33,6 @@ const send = (res, payload) => { if (!res.destroyed) res.write(`data: ${JSON.str
 const start = res => { res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" }); res.flushHeaders?.(); };
 const wrap = fn => async (req, res) => {
   try { await fn(req, res); } catch (error) {
-    if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
     if (!res.headersSent) res.status(error.status || 500).json({ message: error.status ? error.message : "Something went wrong. Please try again." });
   }
 };
@@ -78,7 +75,7 @@ const submit = wrap(async (req, res) => {
   if (!hasPermission(req.user, "RECORD_VIDEO")) throw fail(403, "Your account does not have access to AI coaching");
   const fields = validate(sessionSchema, req.body);
   if (!req.file && fields.text.length < 10) throw fail(400, "Record your answer or enter at least 10 characters");
-  const audio = req.file ? await fs.readFile(req.file.path) : null;
+  const audio = req.file?.buffer || null;
   if (audio) {
     try { fields.duration = wavDuration(audio); } catch (error) { throw fail(400, error.message); }
     fields.text = "";
@@ -97,10 +94,17 @@ const submit = wrap(async (req, res) => {
   if (!license) throw fail(403, "An active license with enough credits is required");
   let session;
   let completed = false;
+  let audioReference = "";
   try {
-    session = await Session.create({ ...fields, user: req.user.id, profile, previous: previous?._id || null, audioFile: req.file?.filename || "" });
+    if (audio) {
+      audioReference = await saveAudio({
+        buffer: audio,
+        contentType: req.file.mimetype,
+        userId: req.user.id,
+      });
+    }
+    session = await Session.create({ ...fields, user: req.user.id, profile, previous: previous?._id || null, audioFile: audioReference });
     // This recording now belongs to the saved session, including on AI failure.
-    req.file = null;
     start(res);
     send(res, { type: "session", sessionId: session._id });
     send(res, { type: "status", stage: "evaluating" });
@@ -115,6 +119,11 @@ const submit = wrap(async (req, res) => {
     const publicSession = session.toObject(); delete publicSession.audioFile; delete publicSession.followupPending;
     send(res, { type: "done", session: publicSession, credits: license.credits });
   } catch (error) {
+    if (!session && audioReference) {
+      await deleteAudio(audioReference).catch((cleanupError) =>
+        console.error("Orphan coaching audio cleanup failed", cleanupError)
+      );
+    }
     if (!completed) {
       await UserLicense.updateOne({ _id: license._id }, { $inc: { credits: feature.credits } });
       if (session) await Session.updateOne({ _id: session._id }, { status: "FAILED" });
@@ -135,7 +144,7 @@ const audio = wrap(async (req, res) => {
   const session = await Session.findOne({ _id: id(req.params.id), deleted: false, $or: [{ user: req.user.id }, { "review.coach": req.user.id }] }).select("+audioFile");
   if (!session || !session.audioFile) throw fail(404, "Recording not found");
   if (String(session.user) !== req.user.id) await requireExpert(req);
-  res.type("audio/wav").sendFile(path.join(audioDir, path.basename(session.audioFile)));
+  await streamAudio(session.audioFile, req, res, "audio/wav");
 });
 const updateSession = wrap(async (req, res) => {
   const fields = validate(Joi.object({ helpful: Joi.boolean(), applied: Joi.boolean() }).min(1), req.body);
@@ -146,9 +155,18 @@ const updateSession = wrap(async (req, res) => {
   await session.save(); res.json({ session });
 });
 const remove = wrap(async (req, res) => {
-  const session = await owned(req);
+  const session = await Session.findOne({ _id: id(req.params.id), user: req.user.id, deleted: false }).select("+audioFile");
+  if (!session) throw fail(404, "Session not found");
   if (session.status === "PROCESSING") throw fail(409, "Please wait until feedback finishes");
-  session.deleted = true; await session.save(); res.json({ success: true });
+  const audioReference = session.audioFile;
+  session.deleted = true;
+  await session.save();
+  if (audioReference) {
+    await deleteAudio(audioReference)
+      .then(() => Session.updateOne({ _id: session._id }, { $set: { audioFile: "" } }))
+      .catch((error) => console.error("Deleted coaching audio cleanup failed", error));
+  }
+  res.json({ success: true });
 });
 const followup = wrap(async (req, res) => {
   const { question } = validate(Joi.object({ question: Joi.string().trim().min(3).max(700).required() }), req.body);

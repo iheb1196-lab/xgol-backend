@@ -1,5 +1,3 @@
-const fs = require("fs");
-const path = require("path");
 const mongoose = require("mongoose");
 
 const {
@@ -14,6 +12,11 @@ const UserLicense = require("../../models/userLicense");
 const FeatureType = require("../../models/featureType");
 const UserJournal = require("../../models/userJournal");
 const CoachingProfile = require("../../models/coachingProfile");
+const {
+  deleteAudio,
+  saveAudio,
+  streamAudio,
+} = require("../../utils/audioStorage");
 
 /** ------------------------------------------------------------------ */
 /** Helpers                                                             */
@@ -31,11 +34,6 @@ const setupSSE = (res) => {
 
 const sendEvent = (res, payload) => {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
-};
-
-const removeUploadedFile = (file) => {
-  if (!file?.path) return;
-  fs.unlink(file.path, () => {});
 };
 
 /** Deducts feature credits and journals the transaction. Returns the remaining balance. */
@@ -183,7 +181,6 @@ ${text}`;
 
 const submitPractice = async (req, res) => {
   if (!hasRequiredDelegatedPermissions(req.user, "RECORD_VIDEO")) {
-    removeUploadedFile(req.file);
     return res.status(403).json({
       status: "Failed",
       message: "User does not have the required permissions",
@@ -193,14 +190,12 @@ const submitPractice = async (req, res) => {
   try {
     hasFeatureAccess = await featureAccessPermission(req.user, "RECORD_VIDEO");
   } catch (error) {
-    removeUploadedFile(req.file);
     return res.status(500).json({
       status: "Failed",
       message: "Could not verify feature access",
     });
   }
   if (!hasFeatureAccess) {
-    removeUploadedFile(req.file);
     return res.status(403).json({
       status: "Failed",
       message: "Upgrade your license to access this feature",
@@ -213,12 +208,12 @@ const submitPractice = async (req, res) => {
   }
 
   let session;
+  let audioReference = "";
   try {
     const { speech: speechId, objective, duration } = req.body;
     const normalizedObjective =
       typeof objective === "string" ? objective.trim().slice(0, 300) : "";
     if (!mongoose.isValidObjectId(speechId)) {
-      removeUploadedFile(req.file);
       return res.status(400).json({
         status: "Failed",
         message: "A valid speech is required",
@@ -230,7 +225,6 @@ const submitPractice = async (req, res) => {
       deleted: false,
     });
     if (!speech) {
-      removeUploadedFile(req.file);
       return res
         .status(404)
         .json({ status: "Failed", message: "Speech not found" });
@@ -256,12 +250,19 @@ const submitPractice = async (req, res) => {
     const coachingProfile = await CoachingProfile.findOne({ user: req.user.id })
       .select("goal role audience challenge level language style minutes eventName eventDate -_id").lean();
 
+    const audioBytes = req.file.buffer;
+    audioReference = await saveAudio({
+      buffer: audioBytes,
+      contentType: req.file.mimetype,
+      userId: req.user.id,
+    });
+
     session = new PracticeSession({
       user: req.user.id,
       speech: speech._id,
       userLicense: userLicense?._id,
       objective: normalizedObjective,
-      audioFile: req.file.filename,
+      audioFile: audioReference,
       mimeType: req.file.mimetype,
       duration: Math.min(70, Math.max(0, Number(duration) || 0)),
       comparedToSession: previousSession?._id || null,
@@ -342,8 +343,6 @@ The raw WAV recording is attached. Evaluate the delivery and give actionable fee
 
     sendEvent(res, { type: "status", stage: "evaluating" });
 
-    const audioBytes = await fs.promises.readFile(req.file.path);
-
     const fullText = await streamMantleText({
       api: "openai",
       system,
@@ -373,8 +372,10 @@ The raw WAV recording is attached. Evaluate the delivery and give actionable fee
     if (session) {
       session.status = "FAILED";
       await session.save().catch(() => {});
-    } else {
-      removeUploadedFile(req.file);
+    } else if (audioReference) {
+      await deleteAudio(audioReference).catch((cleanupError) =>
+        console.error("Orphan practice audio cleanup failed", cleanupError)
+      );
     }
     if (res.headersSent) {
       sendEvent(res, {
@@ -455,20 +456,20 @@ const getSessionAudio = async (req, res) => {
     if (!session) {
       return res.status(404).json({ error: "Practice session not found" });
     }
-    const audioPath = path.join(
-      __dirname,
-      "..",
-      "..",
-      "uploads",
-      "audio",
-      session.audioFile
+    await streamAudio(
+      session.audioFile,
+      req,
+      res,
+      session.mimeType || "audio/wav"
     );
-    if (!fs.existsSync(audioPath)) {
-      return res.status(404).json({ error: "Audio file not found" });
-    }
-    res.setHeader("Content-Type", session.mimeType || "audio/wav");
-    return fs.createReadStream(audioPath).pipe(res);
+    return undefined;
   } catch (error) {
+    if (error.code === "AUDIO_NOT_FOUND") {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.code === "AUDIO_STORAGE_NOT_CONFIGURED") {
+      return res.status(503).json({ error: error.message });
+    }
     return res.status(500).json({ error: error.message });
   }
 };
@@ -520,6 +521,11 @@ const deleteSession = async (req, res) => {
     );
     if (!session) {
       return res.status(404).json({ error: "Practice session not found" });
+    }
+    if (session.audioFile) {
+      await deleteAudio(session.audioFile).catch((error) =>
+        console.error("Deleted practice audio cleanup failed", error)
+      );
     }
     return res
       .status(200)

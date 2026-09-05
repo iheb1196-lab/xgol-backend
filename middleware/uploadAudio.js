@@ -1,27 +1,18 @@
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
-const { v4: uuidv4 } = require("uuid");
 
-// Local storage for development: recordings live in uploads/audio/.
+// Kept for local-development storage and compatibility with older recordings.
 const audioDir = path.join(__dirname, "..", "uploads", "audio");
-fs.mkdirSync(audioDir, { recursive: true });
 
 const extensionByMime = {
   "audio/wav": ".wav",
   "audio/x-wav": ".wav",
 };
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, audioDir),
-  filename: (req, file, cb) => {
-    const ext = extensionByMime[file.mimetype];
-    cb(null, `${Date.now()}-${uuidv4()}${ext}`);
-  },
-});
-
 const upload = multer({
-  storage,
+  // Keep the small WAV in memory so the request can send it to the AI provider
+  // and persist it to Vercel Blob without writing to Vercel's read-only disk.
+  storage: multer.memoryStorage(),
   // Gemma 4 E2B has a 3.5 MB total JSON request limit. A 2.3 MiB WAV
   // becomes about 3.2 MB after base64 encoding, leaving room for prompts.
   limits: { fileSize: Math.floor(2.3 * 1024 * 1024) },

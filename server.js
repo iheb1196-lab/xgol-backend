@@ -51,12 +51,29 @@ const swaggerOptions = {
 };
 
 const allowedOrigins = [
+  ...(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  process.env.FRONT_URL,
+  process.env.FRONT_URL_DEP,
   "https://xgol.pro",
   "https://www.xgol.pro",
   "http://localhost:3000",
-];
+]
+  .filter(Boolean)
+  .map((origin) => origin.replace(/\/$/, ""));
 
-const server = require("http").createServer(app);
+let databasePromise;
+const ensureDatabaseConnection = () => {
+  if (!databasePromise) {
+    databasePromise = connection().catch((error) => {
+      databasePromise = undefined;
+      throw error;
+    });
+  }
+  return databasePromise;
+};
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 
@@ -65,7 +82,12 @@ app.use(cookieParser());
 app.use(express.json({ limit: "10mb" }));
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+        return callback(null, true);
+      }
+      return callback(new Error("Origin is not allowed by CORS"));
+    },
     credentials: true,
   })
 );
@@ -78,6 +100,26 @@ app.use(
     ":remote-addr - :user - :method :url :status - :response-time ms - :res[content-length]"
   )
 );
+
+app.get("/health", async (_req, res) => {
+  try {
+    await ensureDatabaseConnection();
+    res.json({ status: "ok" });
+  } catch (error) {
+    console.error("Health check database connection failed:", error);
+    res.status(503).json({ status: "error", message: "Database unavailable" });
+  }
+});
+
+app.use(async (_req, res, next) => {
+  try {
+    await ensureDatabaseConnection();
+    next();
+  } catch (error) {
+    console.error("Database connection failed:", error);
+    res.status(503).json({ message: "Database unavailable" });
+  }
+});
 
 app.use("/api", authRoutes);
 app.use("/api", permissionRoutes);
@@ -98,15 +140,19 @@ app.use("/api", errorRoute);
 
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-connection()
-  .then(async () => {
-    const port = process.env.PORT || 8080;
+module.exports = app;
 
-    server.listen(port, () => {
-      console.log(`Server is running on ${port}...`);
+if (require.main === module) {
+  ensureDatabaseConnection()
+    .then(() => {
+      const port = process.env.PORT || 8080;
+
+      app.listen(port, () => {
+        console.log(`Server is running on ${port}...`);
+      });
+    })
+    .catch((error) => {
+      console.log("Could not connect to database!");
+      console.error(error);
     });
-  })
-  .catch((error) => {
-    console.log("Could not connect to database!");
-    console.error(error);
-  });
+}

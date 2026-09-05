@@ -41,7 +41,7 @@ router.post("/practice/improve-script", auth, controllers.improveScript);
  * /api/practice/sessions:
  *   post:
  *     summary: Submit a practice recording for AI evaluation (streamed)
- *     description: Stores the audio locally, sends the raw WAV recording to Gemma 4 through Bedrock Mantle, and streams feedback as Server-Sent Events.
+ *     description: Stores the audio privately, sends the raw WAV recording to Gemma 4 through Bedrock Mantle, and streams feedback as Server-Sent Events.
  *     tags:
  *       - Practice
  *     security:
