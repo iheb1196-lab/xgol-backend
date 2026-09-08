@@ -6,6 +6,8 @@ router.use("/coaching", auth);
 router.get("/coaching", c.dashboard);
 router.get("/coaching/history", c.history);
 router.put("/coaching/profile", c.saveProfile);
+router.patch("/coaching/guide", c.dismissGuide);
+router.post("/coaching/plan", c.createPlan);
 router.get("/coaching/coaches", c.coaches);
 router.get("/coaching/inbox", c.expertInbox);
 router.put("/coaching/availability", c.availability);

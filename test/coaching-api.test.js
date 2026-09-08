@@ -27,11 +27,15 @@ test("coaching API: persistence, credits, isolation, retries and human review li
   const Feature = require("../models/featureType");
   const mantle = require("../aws/mantle");
   let providerFailure = false;
+  let invalidPlan = false;
   const prompts = [];
   const originalStream = mantle.streamMantleText;
   mantle.streamMantleText = async options => {
     if (providerFailure) throw new Error("Simulated provider outage");
     prompts.push(options);
+    if (options.system.includes("Create one small, useful speaking mission")) {
+      return invalidPlan ? '{"title":"Incomplete"}' : JSON.stringify({ greeting: "Let's make one clear request.", title: "Ask for a pilot", reason: "Your goal is to win support.", warmup: "Name the decision you want.", prompt: "Ask for a pilot in 30 seconds.", opening: "I'd like to try a pilot.", focus: "Make a specific request.", curveball: "Why now?", takeaway: "Use this opening at your next meeting." });
+    }
     const feedback = "## Your goal\nWin board support.\n## What worked\nYour recommendation was clear.\n## One change\nName a concrete next step.\n## Two-minute exercise\n1. State the decision.\n2. Add an owner.\n3. Repeat.\n## Moments to replay\nNo audio timestamps available.\n## Progress\nThis is the baseline.\n## Transcript draft\nText submission; no audio transcript.";
     options.onText?.(feedback); return feedback;
   };
@@ -78,6 +82,38 @@ test("coaching API: persistence, credits, isolation, retries and human review li
     assert.equal(JSON.parse(prompts[0].prompt).learnerProfile.language, "French");
     assert.equal((await request(`/sessions/${sessionId}`, "GET", null, 1)).status, 404);
     assert.equal((await request(`/sessions/${sessionId}`, "PATCH", { helpful: true }, 1)).status, 404);
+  });
+  await t.test("tour dismissal persists only for the authenticated account", async () => {
+    assert.equal((await request("/guide", "PATCH", {})).status, 200);
+    assert.ok((await request()).data.profile.guideDismissedAt);
+    assert.equal((await request("", "GET", null, 1)).data.profile.guideDismissedAt, undefined);
+    assert.equal((await request("/profile", "PUT", { goal: "Test", currentPlan: { title: "Injected" } })).status, 400);
+  });
+  await t.test("personal plans persist without spending credits and simultaneous requests share a lock", async () => {
+    const checkIn = { energy: "nervous", minutes: 2, situation: "Ask my manager for a pilot" };
+    const before = (await request()).data.credits;
+    const results = await Promise.all([request("/plan", "POST", checkIn), request("/plan", "POST", checkIn)]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 429]);
+    const plan = results.find(result => result.status === 200).data.plan;
+    const dashboard = (await request()).data;
+    assert.equal(dashboard.profile.currentPlan.id, plan.id);
+    assert.deepEqual(dashboard.profile.currentPlan.checkIn, checkIn);
+    assert.equal(dashboard.profile.planningRequestedAt, undefined);
+    assert.equal(dashboard.credits, before);
+    assert.equal((await request("", "GET", null, 1)).data.profile.currentPlan, undefined);
+    const prompt = JSON.parse(prompts.find(options => options.system.includes("Create one small, useful speaking mission")).prompt);
+    assert.equal(prompt.learnerProfile.language, "French");
+    assert.equal(prompt.recentPractice[0].focus, "Name a concrete next step.");
+    assert.equal((await request("/plan", "POST", { ...checkIn, user: String(users[1]._id) })).status, 400);
+  });
+  await t.test("invalid AI plans preserve the previous plan and release the lock for retry", async () => {
+    const before = (await request()).data.profile.currentPlan.id;
+    await Profile.updateOne({ user: users[0]._id }, { $unset: { planningRequestedAt: "" } });
+    invalidPlan = true;
+    assert.equal((await request("/plan", "POST", { energy: "ready", minutes: 5 })).status, 503);
+    invalidPlan = false;
+    assert.equal((await request()).data.profile.currentPlan.id, before);
+    assert.equal((await request("/plan", "POST", { energy: "stuck", minutes: 10 })).status, 200);
   });
   await t.test("comparison must belong to this learner and scenario", async () => {
     assert.equal((await request("/sessions", "POST", { ...input, previous: sessionId }, 1)).status, 400);

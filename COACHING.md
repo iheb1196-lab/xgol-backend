@@ -4,6 +4,9 @@ The new authenticated `/api/coaching` endpoints support the My Coaching frontend
 
 ## User journey
 
+- Take or skip a five-stop coaching home tour; the invitation is dismissed per account and the tour can be replayed from the header.
+- Check in with a real situation, self-reported readiness and 2, 5 or 10 minutes. The AI prepares a saved mission with a warm-up, rehearsal, one focus, a suggested opening and a real-life action. Planning uses no assessment credits and does not start a recording or assessment.
+- Optionally reveal an audience curveball and start a separate rehearsal. It is not treated as a like-for-like comparison with the original mission. Assessment prices remain visible before submitting.
 - Save a goal, audience, role, experience, challenge, feedback language/style, available practice time and optional event date.
 - Start a scenario from a quick start, event preparation card or the latest feedback's practice exercise.
 - Submit audio or text. Learning Lab can submit each finished recording automatically; users can turn this off before recording.
@@ -22,6 +25,10 @@ Human review and its single follow-up currently have no additional credit charge
 ## Storage and operational behavior
 
 `CoachingProfile` is unique per user. `CoachingSession` stores the profile snapshot, feedback, comparison link, human review, follow-ups and engagement signals. New collections and indexes are created by Mongoose; no existing records are migrated. Existing speech practice also reads the saved coaching profile.
+
+`POST /api/coaching/plan` accepts `{ energy: "nervous" | "stuck" | "ready", minutes: 2 | 5 | 10, situation?: string }`. It uses the existing Mantle text provider with a 45-second timeout and a bounded, validated JSON response. Only the authenticated user's profile and three recent, completed, non-deleted practice summaries enter the prompt. The latest plan and its check-in are stored as `CoachingProfile.currentPlan`; normal profile updates cannot write this field. One expiring database reservation per account limits planning to once per minute across server instances. A handled failure preserves the last plan and releases the reservation for retry. There is no automatic generation on page load. The default starting exercise is labeled separately from an AI-generated plan.
+
+`PATCH /api/coaching/guide` stores `guideDismissedAt` for the authenticated account. Both new fields are optional, so existing accounts continue to work without a migration. Tour and planning do not change the existing assessment access or credit checks.
 
 Audio uses the existing local `uploads/audio` directory, with a 2.3 MiB upload limit. The coaching client converts audio to mono 12 kHz PCM WAV, allowing the 90-second learning rehearsal to fit. Duration is checked from WAV metadata. Audio is served through authenticated endpoints. Removing an attempt hides it from the learner and coach; removal is a soft delete, matching existing practice history behavior.
 

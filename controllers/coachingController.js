@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Joi = require("joi");
+const { randomUUID } = require("node:crypto");
 const Profile = require("../models/coachingProfile");
 const Session = require("../models/coachingSession");
 const User = require("../models/user");
@@ -8,6 +9,7 @@ const FeatureType = require("../models/featureType");
 const Journal = require("../models/userJournal");
 const { streamMantleText } = require("../aws/mantle");
 const { profileSchema, sessionSchema, section, buildPrompt, wavDuration } = require("../utils/coaching");
+const { checkInSchema, parsePlan, buildPlanPrompt } = require("../utils/coachingPlan");
 const { hasRequiredDelegatedPermissions: hasPermission } = require("../middleware/permissionUtils");
 const { deleteAudio, saveAudio, streamAudio } = require("../utils/audioStorage");
 const activeLicense = user => ({ user, activated: true, $expr: { $gt: [{ $convert: { input: "$expiryDate", to: "date", onError: null, onNull: null } }, new Date()] } });
@@ -62,6 +64,34 @@ const saveProfile = wrap(async (req, res) => {
   const fields = validate(profileSchema, req.body);
   const profile = await Profile.findOneAndUpdate({ user: req.user.id }, { $set: fields }, { upsert: true, new: true, runValidators: true });
   res.json({ profile });
+});
+
+const dismissGuide = wrap(async (req, res) => {
+  const profile = await Profile.findOneAndUpdate({ user: req.user.id }, { $set: { guideDismissedAt: new Date() } }, { upsert: true, new: true });
+  res.json({ guideDismissedAt: profile.guideDismissedAt });
+});
+
+const createPlan = wrap(async (req, res) => {
+  const checkIn = validate(checkInSchema, req.body);
+  // One shared, expiring reservation per account, including across server instances.
+  await Profile.updateOne({ user: req.user.id }, { $setOnInsert: { user: req.user.id } }, { upsert: true }).catch(error => { if (error.code !== 11000) throw error; });
+  const requestedAt = new Date();
+  const profile = await Profile.findOneAndUpdate({
+    user: req.user.id,
+    $or: [{ planningRequestedAt: null }, { planningRequestedAt: { $lt: new Date(requestedAt.getTime() - 60000) } }],
+  }, { $set: { planningRequestedAt: requestedAt } }, { new: true }).lean();
+  if (!profile) throw fail(429, "Your coach is preparing a plan or just finished one. Please wait a minute before creating another.");
+  try {
+    const sessions = await Session.find({ user: req.user.id, deleted: false, status: "COMPLETED" })
+      .sort({ createdAt: -1 }).limit(3).select("title nextFocus exercise review.focus appliedAt").lean();
+    const raw = await streamMantleText({ api: "openai", signal: AbortSignal.timeout(45000), ...buildPlanPrompt(profile, checkIn, sessions, requestedAt) });
+    const plan = { ...parsePlan(raw), id: randomUUID(), createdAt: requestedAt, checkIn };
+    await Profile.updateOne({ user: req.user.id, planningRequestedAt: requestedAt }, { $set: { currentPlan: plan } });
+    res.json({ plan });
+  } catch (error) {
+    await Profile.updateOne({ user: req.user.id, planningRequestedAt: requestedAt }, { $unset: { planningRequestedAt: "" } });
+    throw fail(503, "Your AI coach couldn't prepare a new plan. Try again, or choose a practice below. Your previous plan is still saved; no credits were used.");
+  }
 });
 
 const history = wrap(async (req, res) => {
@@ -224,4 +254,4 @@ const reviewAnswer = wrap(async (req, res) => {
   res.json({ session });
 });
 
-module.exports = { dashboard, history, saveProfile, submit, getSession, audio, updateSession, remove, followup, coaches, requestReview, expertInbox, availability, review, reviewQuestion, reviewAnswer };
+module.exports = { dashboard, history, saveProfile, dismissGuide, createPlan, submit, getSession, audio, updateSession, remove, followup, coaches, requestReview, expertInbox, availability, review, reviewQuestion, reviewAnswer };

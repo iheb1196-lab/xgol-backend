@@ -12,6 +12,17 @@ const schema = new mongoose.Schema({
   minutes: { type: Number, enum: [2, 5, 10], default: 5 },
   eventName: { type: String, default: "" },
   eventDate: { type: String, default: "" },
+  guideDismissedAt: Date,
+  planningRequestedAt: { type: Date, select: false },
+  currentPlan: {
+    type: new mongoose.Schema({
+      id: String, createdAt: Date,
+      checkIn: { energy: String, minutes: Number, situation: String },
+      greeting: String, title: String, reason: String, warmup: String,
+      prompt: String, opening: String, focus: String, curveball: String, takeaway: String,
+    }, { _id: false }),
+    default: undefined,
+  },
   availableForReviews: { type: Boolean, default: false },
   responseHours: { type: Number, default: 48 },
 }, { timestamps: true });
